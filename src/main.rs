@@ -1,8 +1,10 @@
 use ansi_term::Style;
 use anyhow::Result;
+use anyhow::bail;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
+use indicatif::ProgressBar;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -10,6 +12,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 #[derive(Parser)]
@@ -190,9 +193,11 @@ pub fn fetch_servers_cache(ignore_hosts: Vec<String>) -> anyhow::Result<ServersC
             continue;
         }
 
-        println!("Fetching from {host}...");
-
+        let bar = ProgressBar::new_spinner();
+        bar.set_message(format!("Fetching from {host}..."));
+        bar.enable_steady_tick(Duration::from_millis(100));
         let folders = fetch_data_folders(&host);
+        bar.finish();
 
         servers.insert(
             host,
@@ -207,6 +212,11 @@ pub fn fetch_servers_cache(ignore_hosts: Vec<String>) -> anyhow::Result<ServersC
 }
 
 pub fn write_default_config() -> anyhow::Result<()> {
+    let path = config_dir().join("config.toml");
+    if fs::exists(&path)? {
+        bail!("Config file already exists at: {}", &path.display());
+    }
+
     fs::create_dir_all(&config_dir())?;
     let path = config_dir().join("config.toml");
     let cfg = Config::default();
