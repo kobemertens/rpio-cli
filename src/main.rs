@@ -5,6 +5,8 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use indicatif::ProgressBar;
+use indicatif::ProgressFinish;
+use indicatif::ProgressStyle;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -13,6 +15,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
+use strum::IntoEnumIterator;
+use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 use tempfile::NamedTempFile;
 
 #[derive(Parser)]
@@ -26,8 +30,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Servers {
-        #[command(subcommand)]
-        command: ServersCommand,
+        // #[command(subcommand)]
+        // command: ServersCommand,
     },
     Backups {
         #[command(subcommand)]
@@ -42,8 +46,18 @@ enum Commands {
 #[derive(Subcommand)]
 enum ServersCommand {
     List,
-    Tunnel,
     Refresh,
+    Search,
+    Tunnel,
+}
+
+// An operation on a single application
+#[derive(Debug, Clone, Copy, EnumIter, EnumString, Display, AsRefStr)]
+#[strum(serialize_all = "kebab-case")]
+enum ApplicationCommand {
+    Tunnel,
+    RestoreBackup,
+    RestoreFiles,
 }
 
 #[derive(Subcommand)]
@@ -100,14 +114,53 @@ pub fn servers_list(ignore_hosts: Vec<String>) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    lines.iter().for_each(|x| println!("{}", x));
+
+    Ok(())
+}
+
+pub fn servers_search(config: Config) -> anyhow::Result<Option<(String, String)>> {
+    let ignore_hosts = config.ignore_hosts;
+    let cache = load_or_fetch_servers_cache(ignore_hosts)?;
+
+    let lines = build_fzf_lines(&cache);
+
+    if lines.is_empty() {
+        println!("No folders found");
+        return Ok(None);
+    }
+
     if let Some(selected) = run_fzf(&lines)? {
-        if let Some((host, folder)) = parse_selection(&selected) {
-            println!("Connecting to {host}, folder: {folder}");
-            // TODO: ssh, cd, attach, etc.
+        if let Some(selection) = parse_selection(&selected) {
+            return Ok(Some(selection));
         }
     }
 
-    Ok(())
+    Ok(None)
+}
+
+fn choose_application_command() -> Result<ApplicationCommand> {
+    let options: Vec<String> = ApplicationCommand::iter()
+        .map(|c| format!("{}", c))
+        .collect();
+
+    let child = Command::new("gum")
+        .args(["choose", "--header", "Select application command"])
+        .args(&options)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+
+    let output = child.wait_with_output()?;
+
+    if !output.status.success() {
+        bail!("gum was cancelled");
+    }
+
+    let selection = String::from_utf8(output.stdout)?;
+    let selection = selection.trim();
+
+    Ok(selection.parse()?)
 }
 
 fn run_fzf(lines: &[String]) -> anyhow::Result<Option<String>> {
@@ -183,6 +236,19 @@ pub fn load_config() -> Config {
     }
 }
 
+fn create_and_start_spinner(message: String) -> ProgressBar {
+    let style = ProgressStyle::with_template("{spinner} {msg}")
+        .unwrap()
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
+
+    let bar = ProgressBar::new_spinner()
+        .with_style(style)
+        .with_message(message)
+        .with_finish(ProgressFinish::WithMessage("✔ Done".into()));
+    bar.enable_steady_tick(Duration::from_millis(100));
+    bar
+}
+
 pub fn fetch_servers_cache(ignore_hosts: Vec<String>) -> anyhow::Result<ServersCache> {
     let mut hosts = read_ssh_hosts()?;
     hosts.retain(|h| !ignore_hosts.contains(h));
@@ -192,10 +258,7 @@ pub fn fetch_servers_cache(ignore_hosts: Vec<String>) -> anyhow::Result<ServersC
         if host.is_empty() {
             continue;
         }
-
-        let bar = ProgressBar::new_spinner();
-        bar.set_message(format!("Fetching from {host}..."));
-        bar.enable_steady_tick(Duration::from_millis(100));
+        let bar = create_and_start_spinner(format!("Fetching from {host}..."));
         let folders = fetch_data_folders(&host);
         bar.finish();
 
@@ -267,6 +330,26 @@ fn fetch_data_folders(host: &str) -> Vec<DataFolder> {
     }
 }
 
+fn fetch_containers_for_app(host: &str, app: &str) -> Result<Vec<String>> {
+    let spinner = create_and_start_spinner(format!(
+        "Fetching containers for host: {host} and app: {app}"
+    ));
+    let mut command = Command::new("ssh");
+    command.arg(host).arg(format!(
+        "cd /data/{app} && docker compose ps --format {{{{.Names}}}}"
+    ));
+    println!("{:?}", command);
+
+    let output = command.output()?;
+
+    spinner.finish();
+
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|x| x.to_owned())
+        .collect())
+}
+
 pub fn load_servers_cache() -> ServersCache {
     let path = servers_cache_path();
 
@@ -328,11 +411,47 @@ fn read_ssh_hosts() -> anyhow::Result<Vec<String>> {
     Ok(hosts)
 }
 
-// Config order
-// 1. CLI args
-// 2. ENV vars
-// 3. Config
-// 4. Hard coded defaults
+fn run_container_tunnel(host: &str, app: &str, container: &str) -> Result<()> {
+    let output = Command::new("./container-tunnel")
+        .arg(host)
+        .arg(app)
+        .arg(container)
+        .output()?;
+
+    Ok(())
+}
+
+fn restore_backup_or_files(host: &str, app: &str, is_backup: bool) -> Result<()> {
+    let hostpath = if is_backup {
+        format!("/data/{app}/data/db/backups")
+    } else {
+        format!("/data/{app}/data/files/")
+    };
+    let localpath = if is_backup {
+        format!("data/db")
+    } else {
+        format!("data/files")
+    };
+    let loading_message = if is_backup {
+        "Retrieving backup files"
+    } else {
+        "Retrieving files"
+    };
+    let spinner = create_and_start_spinner(loading_message.to_owned());
+    std::fs::create_dir_all(&localpath)?;
+    let mut command = Command::new("rsync");
+    command
+        .arg("-azv")
+        .arg("--partial")
+        .arg("-e")
+        .arg("ssh")
+        .arg(format!("{host}:{hostpath}"))
+        .arg(localpath)
+        .output()?;
+    spinner.finish();
+
+    Ok(())
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -340,16 +459,65 @@ fn main() -> Result<()> {
     init_runtime_dirs(&config)?;
 
     match cli.command {
-        Commands::Servers { command } => match command {
-            ServersCommand::List => servers_list(config.ignore_hosts)?,
-            ServersCommand::Tunnel => {
-                println!("Creating server tunnel...");
+        Commands::Servers {} => {
+            let selected_server = servers_search(config)?;
+
+            if let Some((host, app)) = selected_server {
+                let command = choose_application_command()?;
+                match command {
+                    ApplicationCommand::Tunnel => {
+                        println!("THIS IS STILL A WORK IN PROGRESS AND DOES CURRENTLY NOT WORK");
+                        let containers: Vec<String> = fetch_containers_for_app(&host, &app)?;
+                        let result = run_fzf(&containers)?;
+                        if let Some(container) = result {
+                            run_container_tunnel(&host, &app, &container)?;
+                        }
+                    }
+                    ApplicationCommand::RestoreBackup => {
+                        restore_backup_or_files(&host, &app, true)?;
+                    }
+                    ApplicationCommand::RestoreFiles => {
+                        restore_backup_or_files(&host, &app, false)?;
+                    }
+                }
+            } else {
+                return Ok(());
             }
-            ServersCommand::Refresh => {
-                let cache = fetch_servers_cache(config.ignore_hosts)?;
-                write_servers_cache(&cache)?;
-            }
-        },
+        }
+        // Commands::Servers { command } => match command {
+        //     ServersCommand::List => servers_list(config.ignore_hosts)?,
+        //     ServersCommand::Tunnel => {
+        //         println!("Creating server tunnel...");
+        //     }
+        //     ServersCommand::Refresh => {
+        //         let cache = fetch_servers_cache(config.ignore_hosts)?;
+        //         write_servers_cache(&cache)?;
+        //     }
+        //     ServersCommand::Search => {
+        //         let selected_server = servers_search(config)?;
+
+        //         if let Some((host, app)) = selected_server {
+        //             let command = choose_application_command()?;
+        //             match command {
+        //                 ApplicationCommand::Tunnel => {
+        //                     let containers = fetch_containers_for_app(&host, &app)?;
+        //                     let result = run_fzf(&containers)?;
+        //                     if let Some(container) = result {
+        //                         run_container_tunnel(&host, &app, &container)?;
+        //                     }
+        //                 }
+        //                 ApplicationCommand::RestoreBackup => {
+        //                     restore_backup_or_files(&host, &app, true)?;
+        //                 }
+        //                 ApplicationCommand::RestoreFiles => {
+        //                     restore_backup_or_files(&host, &app, false)?;
+        //                 }
+        //             }
+        //         } else {
+        //             return Ok(());
+        //         }
+        //     }
+        // },
         Commands::Backups { command } => match command {
             BackupsCommand::Restore => {
                 println!("Restoring backup...");
