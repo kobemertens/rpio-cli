@@ -9,6 +9,7 @@ use indicatif::ProgressFinish;
 use indicatif::ProgressStyle;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_yaml::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
@@ -32,6 +33,8 @@ enum Commands {
     Servers {
         // #[command(subcommand)]
         // command: ServersCommand,
+        #[arg(long, num_args = 0..)]
+        refresh: Option<Vec<String>>,
     },
     Backups {
         #[command(subcommand)]
@@ -55,9 +58,11 @@ enum ServersCommand {
 #[derive(Debug, Clone, Copy, EnumIter, EnumString, Display, AsRefStr)]
 #[strum(serialize_all = "kebab-case")]
 enum ApplicationCommand {
+    SshSession,
     Tunnel,
     RestoreBackup,
     RestoreFiles,
+    HostedUrl,
 }
 
 #[derive(Subcommand)]
@@ -70,9 +75,79 @@ enum ConfigCommand {
     Init,
 }
 
+pub struct RemoteApp {
+    host: String,
+    app_name: String,
+}
+
+impl RemoteApp {
+    fn new(host: String, app_name: String) -> Self {
+        RemoteApp { host, app_name }
+    }
+
+    fn fetch_containers(&self) -> Result<Vec<String>> {
+        let spinner = create_and_start_spinner(format!(
+            "Fetching containers for host: {} and app: {}",
+            &self.host, &self.app_name
+        ));
+        let mut command = Command::new("ssh");
+        command.arg(&self.host).arg(format!(
+            "cd /data/{} && docker compose ps --format {{{{.Names}}}}",
+            &self.app_name
+        ));
+        println!("{:?}", command);
+
+        let output = command.output()?;
+
+        spinner.finish();
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|x| x.to_owned())
+            .collect())
+    }
+
+    fn retrieve_app_docker_config(&self) -> Result<String> {
+        let spinner =
+            create_and_start_spinner(format!("Fetching docker config for {}", &self.app_name));
+        let output = Command::new("ssh")
+            .arg(&self.host)
+            .arg(format!(
+                "cd {} && docker compose config",
+                self.remote_directory()
+            ))
+            .output()?;
+
+        spinner.finish();
+
+        Ok(String::from_utf8(output.stdout)?)
+    }
+
+    fn remote_directory(&self) -> String {
+        format!("/data/{}", self.app_name)
+    }
+}
+
 fn project_dirs() -> ProjectDirs {
-    ProjectDirs::from("com", "redpencil", "semanticworks-cli")
-        .expect("Could not determine config directory")
+    ProjectDirs::from("com", "redpencil", "rpio-cli").expect("Could not determine config directory")
+}
+
+fn get_env(doc: &Value, service: &str, key: &str) -> Option<String> {
+    let services = doc.get("services")?;
+    let svc = services.get(service)?;
+    let env = svc.get("environment")?;
+
+    match env {
+        Value::Mapping(map) => map
+            .get(&Value::String(key.into()))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        Value::Sequence(seq) => seq.iter().filter_map(|v| v.as_str()).find_map(|entry| {
+            let (k, v) = entry.split_once('=')?;
+            if k == key { Some(v.to_string()) } else { None }
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -105,7 +180,7 @@ fn parse_selection(selected: &str) -> Option<(String, String)> {
 }
 
 pub fn servers_list(ignore_hosts: Vec<String>) -> anyhow::Result<()> {
-    let cache = load_or_fetch_servers_cache(ignore_hosts)?;
+    let cache = load_or_fetch_servers_cache(&ignore_hosts)?;
 
     let lines = build_fzf_lines(&cache);
 
@@ -119,9 +194,9 @@ pub fn servers_list(ignore_hosts: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn servers_search(config: Config) -> anyhow::Result<Option<(String, String)>> {
-    let ignore_hosts = config.ignore_hosts;
-    let cache = load_or_fetch_servers_cache(ignore_hosts)?;
+pub fn servers_search(config: &Config) -> anyhow::Result<Option<RemoteApp>> {
+    let ignore_hosts = &config.ignore_hosts;
+    let cache = load_or_fetch_servers_cache(&ignore_hosts)?;
 
     let lines = build_fzf_lines(&cache);
 
@@ -131,8 +206,8 @@ pub fn servers_search(config: Config) -> anyhow::Result<Option<(String, String)>
     }
 
     if let Some(selected) = run_fzf(&lines)? {
-        if let Some(selection) = parse_selection(&selected) {
-            return Ok(Some(selection));
+        if let Some((host, app_name)) = parse_selection(&selected) {
+            return Ok(Some(RemoteApp::new(host, app_name)));
         }
     }
 
@@ -192,7 +267,7 @@ fn run_fzf(lines: &[String]) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn load_or_fetch_servers_cache(ignore_hosts: Vec<String>) -> anyhow::Result<ServersCache> {
+fn load_or_fetch_servers_cache(ignore_hosts: &Vec<String>) -> anyhow::Result<ServersCache> {
     let path = servers_cache_path();
 
     if path.exists() {
@@ -249,7 +324,7 @@ fn create_and_start_spinner(message: String) -> ProgressBar {
     bar
 }
 
-pub fn fetch_servers_cache(ignore_hosts: Vec<String>) -> anyhow::Result<ServersCache> {
+pub fn fetch_servers_cache(ignore_hosts: &Vec<String>) -> anyhow::Result<ServersCache> {
     let mut hosts = read_ssh_hosts()?;
     hosts.retain(|h| !ignore_hosts.contains(h));
     let mut servers = BTreeMap::new();
@@ -258,7 +333,7 @@ pub fn fetch_servers_cache(ignore_hosts: Vec<String>) -> anyhow::Result<ServersC
         if host.is_empty() {
             continue;
         }
-        let bar = create_and_start_spinner(format!("Fetching from {host}..."));
+        let bar = create_and_start_spinner(format!("Indexing apps from {host}..."));
         let folders = fetch_data_folders(&host);
         bar.finish();
 
@@ -328,26 +403,6 @@ fn fetch_data_folders(host: &str) -> Vec<DataFolder> {
             .collect(),
         _ => Vec::new(), // same as `|| true`
     }
-}
-
-fn fetch_containers_for_app(host: &str, app: &str) -> Result<Vec<String>> {
-    let spinner = create_and_start_spinner(format!(
-        "Fetching containers for host: {host} and app: {app}"
-    ));
-    let mut command = Command::new("ssh");
-    command.arg(host).arg(format!(
-        "cd /data/{app} && docker compose ps --format {{{{.Names}}}}"
-    ));
-    println!("{:?}", command);
-
-    let output = command.output()?;
-
-    spinner.finish();
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|x| x.to_owned())
-        .collect())
 }
 
 pub fn load_servers_cache() -> ServersCache {
@@ -446,11 +501,29 @@ fn restore_backup_or_files(host: &str, app: &str, is_backup: bool) -> Result<()>
         .arg("-e")
         .arg("ssh")
         .arg(format!("{host}:{hostpath}"))
-        .arg(localpath)
-        .output()?;
+        .arg(localpath);
+    println!("{:?}", command);
+    command.output()?;
     spinner.finish();
 
     Ok(())
+}
+
+fn attach_ssh_session(remote_app: &RemoteApp) -> Result<()> {
+    let app_dir = directory_for_app(&remote_app.app_name);
+    let mut command = Command::new("ssh");
+    command
+        .arg("-t")
+        .arg(&remote_app.host)
+        .arg(format!("cd {app_dir} ; bash --login"));
+    println!("Running command {:?}", command);
+    command.status()?;
+
+    Ok(())
+}
+
+fn directory_for_app(app: &str) -> String {
+    format!("/data/{app}")
 }
 
 fn main() -> Result<()> {
@@ -459,25 +532,49 @@ fn main() -> Result<()> {
     init_runtime_dirs(&config)?;
 
     match cli.command {
-        Commands::Servers {} => {
-            let selected_server = servers_search(config)?;
+        Commands::Servers { refresh } => {
+            match refresh {
+                None => {}
+                Some(servers) if servers.is_empty() => {
+                    let cache = fetch_servers_cache(&config.ignore_hosts)?;
+                    write_servers_cache(&cache)?;
+                }
+                Some(servers) => {
+                    bail!("Partial refresh not implemented yet!");
+                }
+            }
+            let selected_server = servers_search(&config)?;
 
-            if let Some((host, app)) = selected_server {
+            if let Some(remote_app) = selected_server {
                 let command = choose_application_command()?;
                 match command {
                     ApplicationCommand::Tunnel => {
                         println!("THIS IS STILL A WORK IN PROGRESS AND DOES CURRENTLY NOT WORK");
-                        let containers: Vec<String> = fetch_containers_for_app(&host, &app)?;
+                        let containers: Vec<String> = remote_app.fetch_containers()?;
                         let result = run_fzf(&containers)?;
                         if let Some(container) = result {
-                            run_container_tunnel(&host, &app, &container)?;
+                            run_container_tunnel(
+                                &remote_app.host,
+                                &remote_app.app_name,
+                                &container,
+                            )?;
                         }
                     }
+                    ApplicationCommand::SshSession => {
+                        attach_ssh_session(&remote_app)?;
+                    }
                     ApplicationCommand::RestoreBackup => {
-                        restore_backup_or_files(&host, &app, true)?;
+                        restore_backup_or_files(&remote_app.host, &remote_app.app_name, true)?;
                     }
                     ApplicationCommand::RestoreFiles => {
-                        restore_backup_or_files(&host, &app, false)?;
+                        restore_backup_or_files(&remote_app.host, &remote_app.app_name, false)?;
+                    }
+                    ApplicationCommand::HostedUrl => {
+                        let yaml = remote_app.retrieve_app_docker_config()?;
+                        let doc: Value = serde_yaml::from_str(&yaml)?;
+                        if let Some(url) = get_env(&doc, "identifier", "LETSENCRYPT_HOST") {
+                            println!("{url}");
+                        }
                     }
                 }
             } else {
