@@ -31,7 +31,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Apps {
-        #[arg(long, num_args = 0..)]
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(short, long, num_args = 0..)]
         refresh: Option<Vec<String>>,
     },
     Config {
@@ -609,7 +611,10 @@ fn main() -> Result<()> {
     init_runtime_dirs(&config)?;
 
     match cli.command {
-        Commands::Apps { refresh } => {
+        Commands::Apps { dry_run, refresh } => {
+            if dry_run {
+                bail!("Not implemented yet");
+            }
             match refresh {
                 None => {}
                 Some(servers) if servers.is_empty() => {
@@ -626,7 +631,6 @@ fn main() -> Result<()> {
                 let command = choose_application_command()?;
                 match command {
                     ApplicationCommand::Tunnel => {
-                        println!("THIS IS STILL A WORK IN PROGRESS AND DOES CURRENTLY NOT WORK");
                         let containers: Vec<String> = remote_app.fetch_containers()?;
                         let result = run_fzf(&containers)?;
                         if let Some(container) = result {
