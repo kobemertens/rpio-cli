@@ -30,15 +30,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Servers {
-        // #[command(subcommand)]
-        // command: ServersCommand,
+    Apps {
         #[arg(long, num_args = 0..)]
         refresh: Option<Vec<String>>,
-    },
-    Backups {
-        #[command(subcommand)]
-        command: BackupsCommand,
     },
     Config {
         #[command(subcommand)]
@@ -47,7 +41,7 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum ServersCommand {
+enum AppsCommand {
     List,
     Refresh,
     Search,
@@ -86,7 +80,7 @@ impl RemoteApp {
     }
 
     fn fetch_containers(&self) -> Result<Vec<String>> {
-        let spinner = create_and_start_spinner(format!(
+        let spinner = create_and_start_spinner(&format!(
             "Fetching containers for host: {} and app: {}",
             &self.host, &self.app_name
         ));
@@ -109,7 +103,7 @@ impl RemoteApp {
 
     fn retrieve_app_docker_config(&self) -> Result<String> {
         let spinner =
-            create_and_start_spinner(format!("Fetching docker config for {}", &self.app_name));
+            create_and_start_spinner(&format!("Fetching docker config for {}", &self.app_name));
         let output = Command::new("ssh")
             .arg(&self.host)
             .arg(format!(
@@ -232,8 +226,7 @@ fn choose_application_command() -> Result<ApplicationCommand> {
         bail!("gum was cancelled");
     }
 
-    let selection = String::from_utf8(output.stdout)?;
-    let selection = selection.trim();
+    let selection = String::from_utf8(output.stdout)?.trim().to_owned();
 
     Ok(selection.parse()?)
 }
@@ -311,14 +304,14 @@ pub fn load_config() -> Config {
     }
 }
 
-fn create_and_start_spinner(message: String) -> ProgressBar {
+fn create_and_start_spinner(message: &str) -> ProgressBar {
     let style = ProgressStyle::with_template("{spinner} {msg}")
         .unwrap()
         .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
 
     let bar = ProgressBar::new_spinner()
         .with_style(style)
-        .with_message(message)
+        .with_message(message.to_owned())
         .with_finish(ProgressFinish::WithMessage("✔ Done".into()));
     bar.enable_steady_tick(Duration::from_millis(100));
     bar
@@ -333,7 +326,7 @@ pub fn fetch_servers_cache(ignore_hosts: &Vec<String>) -> anyhow::Result<Servers
         if host.is_empty() {
             continue;
         }
-        let bar = create_and_start_spinner(format!("Indexing apps from {host}..."));
+        let bar = create_and_start_spinner(&format!("Indexing apps from {host}..."));
         let folders = fetch_data_folders(&host);
         bar.finish();
 
@@ -466,12 +459,53 @@ fn read_ssh_hosts() -> anyhow::Result<Vec<String>> {
     Ok(hosts)
 }
 
-fn run_container_tunnel(host: &str, app: &str, container: &str) -> Result<()> {
-    let output = Command::new("./container-tunnel")
-        .arg(host)
-        .arg(app)
-        .arg(container)
+fn prompt_number(prompt: &str) -> Result<u32> {
+    let output = Command::new("gum")
+        .arg("input")
+        .arg("--placeholder")
+        .arg("Enter a number...")
+        .arg("--header")
+        .arg(&prompt)
+        .stderr(Stdio::inherit())
         .output()?;
+
+    if !output.status.success() {
+        bail!("gum was cancelled");
+    }
+
+    let input_str = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+
+    Ok(input_str.parse::<u32>()?)
+}
+
+// Improve this with a ssh crate?
+fn run_container_tunnel(host: &str, app: &str, container: &str) -> Result<()> {
+    let mut container_ip_command: Command = Command::new("ssh");
+    let output = container_ip_command
+        .arg(&host)
+        .arg(format!("docker inspect -f '{{{{range .NetworkSettings.Networks}}}}{{{{println .IPAddress}}}}{{{{end}}}}' {container} | head -n1"))
+        .output()?;
+
+    let output_chars = String::from_utf8_lossy(&output.stdout);
+    let container_ip = output_chars.trim();
+    let remote_port = prompt_number("Choose a port on the container")?;
+    let host_port: u32 = prompt_number("What local port to use?")?;
+
+    let status = Command::new("ssh")
+        .arg(host)
+        .arg("-L")
+        .arg(format!("{host_port}:{container_ip}:{remote_port}"))
+        .arg("-N")
+        .arg("-o")
+        .arg("ExitOnForwardFailure=yes")
+        .arg("-o")
+        .arg("ServerAliveInterval=60")
+        .spawn()?;
+
+    println!("Opening tunnel on http://localhost:{host_port}");
+    println!("Press Ctrl+C to exit");
+
+    status.wait_with_output()?;
 
     Ok(())
 }
@@ -495,7 +529,7 @@ fn restore_backup_or_files(
     } else {
         "Retrieving files"
     };
-    let spinner = create_and_start_spinner(loading_message.to_owned());
+    let spinner = create_and_start_spinner(&loading_message);
     std::fs::create_dir_all(&localpath)?;
     let mut command = Command::new("rsync");
     command
@@ -575,7 +609,7 @@ fn main() -> Result<()> {
     init_runtime_dirs(&config)?;
 
     match cli.command {
-        Commands::Servers { refresh } => {
+        Commands::Apps { refresh } => {
             match refresh {
                 None => {}
                 Some(servers) if servers.is_empty() => {
@@ -636,45 +670,6 @@ fn main() -> Result<()> {
                 return Ok(());
             }
         }
-        // Commands::Servers { command } => match command {
-        //     ServersCommand::List => servers_list(config.ignore_hosts)?,
-        //     ServersCommand::Tunnel => {
-        //         println!("Creating server tunnel...");
-        //     }
-        //     ServersCommand::Refresh => {
-        //         let cache = fetch_servers_cache(config.ignore_hosts)?;
-        //         write_servers_cache(&cache)?;
-        //     }
-        //     ServersCommand::Search => {
-        //         let selected_server = servers_search(config)?;
-
-        //         if let Some((host, app)) = selected_server {
-        //             let command = choose_application_command()?;
-        //             match command {
-        //                 ApplicationCommand::Tunnel => {
-        //                     let containers = fetch_containers_for_app(&host, &app)?;
-        //                     let result = run_fzf(&containers)?;
-        //                     if let Some(container) = result {
-        //                         run_container_tunnel(&host, &app, &container)?;
-        //                     }
-        //                 }
-        //                 ApplicationCommand::RestoreBackup => {
-        //                     restore_backup_or_files(&host, &app, true)?;
-        //                 }
-        //                 ApplicationCommand::RestoreFiles => {
-        //                     restore_backup_or_files(&host, &app, false)?;
-        //                 }
-        //             }
-        //         } else {
-        //             return Ok(());
-        //         }
-        //     }
-        // },
-        Commands::Backups { command } => match command {
-            BackupsCommand::Restore => {
-                println!("Restoring backup...");
-            }
-        },
         Commands::Config { command } => match command {
             ConfigCommand::Init => {
                 write_default_config()?;
