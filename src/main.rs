@@ -60,8 +60,8 @@ enum ServersCommand {
 enum ApplicationCommand {
     SshSession,
     Tunnel,
-    RestoreBackup,
-    RestoreFiles,
+    RetrieveBackup,
+    RetrieveFiles,
     HostedUrl,
 }
 
@@ -240,7 +240,7 @@ fn choose_application_command() -> Result<ApplicationCommand> {
 
 fn run_fzf(lines: &[String]) -> anyhow::Result<Option<String>> {
     let mut child = Command::new("fzf")
-        .args(["--ansi", "--prompt=Select container > "])
+        .args(["--ansi", "--prompt=Select application > "])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
@@ -476,17 +476,20 @@ fn run_container_tunnel(host: &str, app: &str, container: &str) -> Result<()> {
     Ok(())
 }
 
-fn restore_backup_or_files(host: &str, app: &str, is_backup: bool) -> Result<()> {
+fn restore_backup_or_files(
+    host: &str,
+    app: &str,
+    sw_root_folder: &PathBuf,
+    is_backup: bool,
+) -> Result<()> {
     let hostpath = if is_backup {
         format!("/data/{app}/data/db/backups")
     } else {
         format!("/data/{app}/data/files/")
     };
-    let localpath = if is_backup {
-        format!("data/db")
-    } else {
-        format!("data/files")
-    };
+    let mut localpath = sw_root_folder.to_owned();
+    localpath.push(if is_backup { "data/db" } else { "data/files" });
+
     let loading_message = if is_backup {
         "Retrieving backup files"
     } else {
@@ -503,8 +506,16 @@ fn restore_backup_or_files(host: &str, app: &str, is_backup: bool) -> Result<()>
         .arg(format!("{host}:{hostpath}"))
         .arg(localpath);
     println!("{:?}", command);
-    command.output()?;
+    let output = command.output()?;
     spinner.finish();
+    if !output.status.success() {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!(
+            "rsync failed with status {}: {}",
+            output.status,
+            error_message
+        ));
+    }
 
     Ok(())
 }
@@ -524,6 +535,38 @@ fn attach_ssh_session(remote_app: &RemoteApp) -> Result<()> {
 
 fn directory_for_app(app: &str) -> String {
     format!("/data/{app}")
+}
+
+fn find_semantic_works_root_folder() -> Result<PathBuf> {
+    let mut current_dir = std::env::current_dir()?;
+
+    loop {
+        let compose_file = current_dir.join("docker-compose.yml");
+
+        if compose_file.exists() {
+            let contents = fs::read_to_string(&compose_file)?;
+            let doc: Value = serde_yaml::from_str(&contents)?;
+
+            if let Some(services) = doc.get("services").and_then(|s| s.as_mapping()) {
+                for (_name, service) in services {
+                    if let Some(image) = service.get("image").and_then(|v| v.as_str()) {
+                        if image.starts_with("semtech/mu-identifier") {
+                            return Ok(current_dir);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Go up one directory
+        if !current_dir.pop() {
+            break;
+        }
+    }
+
+    bail!(
+        "Could not find docker-compose.yml with service using image semtech/mu-identifier in this or any parent directory"
+    );
 }
 
 fn main() -> Result<()> {
@@ -563,17 +606,29 @@ fn main() -> Result<()> {
                     ApplicationCommand::SshSession => {
                         attach_ssh_session(&remote_app)?;
                     }
-                    ApplicationCommand::RestoreBackup => {
-                        restore_backup_or_files(&remote_app.host, &remote_app.app_name, true)?;
+                    ApplicationCommand::RetrieveBackup => {
+                        let root_folder = find_semantic_works_root_folder()?;
+                        restore_backup_or_files(
+                            &remote_app.host,
+                            &remote_app.app_name,
+                            &root_folder,
+                            true,
+                        )?;
                     }
-                    ApplicationCommand::RestoreFiles => {
-                        restore_backup_or_files(&remote_app.host, &remote_app.app_name, false)?;
+                    ApplicationCommand::RetrieveFiles => {
+                        let root_folder = find_semantic_works_root_folder()?;
+                        restore_backup_or_files(
+                            &remote_app.host,
+                            &remote_app.app_name,
+                            &root_folder,
+                            false,
+                        )?;
                     }
                     ApplicationCommand::HostedUrl => {
                         let yaml = remote_app.retrieve_app_docker_config()?;
                         let doc: Value = serde_yaml::from_str(&yaml)?;
                         if let Some(url) = get_env(&doc, "identifier", "LETSENCRYPT_HOST") {
-                            println!("{url}");
+                            println!("https://{url}");
                         }
                     }
                 }
