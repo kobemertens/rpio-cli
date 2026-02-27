@@ -480,10 +480,8 @@ fn prompt_number(prompt: &str) -> Result<u32> {
     Ok(input_str.parse::<u32>()?)
 }
 
-// Improve this with a ssh crate?
-fn run_container_tunnel(host: &str, app: &str, container: &str) -> Result<()> {
-    let mut container_ip_command: Command = Command::new("ssh");
-    let output = container_ip_command
+fn run_container_tunnel(host: &str, container: &str) -> Result<()> {
+    let output = Command::new("ssh")
         .arg(&host)
         .arg(format!("docker inspect -f '{{{{range .NetworkSettings.Networks}}}}{{{{println .IPAddress}}}}{{{{end}}}}' {container} | head -n1"))
         .output()?;
@@ -594,15 +592,12 @@ fn find_semantic_works_root_folder() -> Result<PathBuf> {
             }
         }
 
-        // Go up one directory
         if !current_dir.pop() {
             break;
         }
     }
 
-    bail!(
-        "Could not find docker-compose.yml with service using image semtech/mu-identifier in this or any parent directory"
-    );
+    bail!("Could not find a semantic.works app in this or any parent directory");
 }
 
 fn main() -> Result<()> {
@@ -636,7 +631,6 @@ fn main() -> Result<()> {
                         if let Some(container) = result {
                             run_container_tunnel(
                                 &remote_app.host,
-                                &remote_app.app_name,
                                 &container,
                             )?;
                         }
