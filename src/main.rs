@@ -41,7 +41,7 @@ enum Commands {
         host: Option<String>,
         #[arg(long)]
         app_name: Option<String>,
-        #[arg()]
+        #[command(subcommand)]
         app_command: Option<ApplicationCommand>,
     },
     Config {
@@ -50,20 +50,18 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand, Clone)]
-enum AppsCommand {
-    List,
-    Refresh,
-    Search,
-    Tunnel,
-}
-
-// An operation on a single application
-#[derive(Debug, Clone, Copy, EnumIter, EnumString, Display, AsRefStr)]
+#[derive(Debug, Clone, EnumIter, EnumString, Display, AsRefStr, Subcommand)]
 #[strum(serialize_all = "kebab-case")]
 enum ApplicationCommand {
     SshSession,
-    Tunnel,
+    Tunnel {
+        #[arg(long)]
+        container_name: Option<String>,
+        #[arg(long)]
+        host_port: Option<u32>,
+        #[arg(long)]
+        remote_port: Option<u32>,
+    },
     RetrieveBackup,
     RetrieveFiles,
     HostedUrl,
@@ -500,7 +498,12 @@ fn prompt_number(prompt: &str) -> Result<u32> {
     Ok(input_str.parse::<u32>()?)
 }
 
-fn run_container_tunnel(host: &str, container: &str) -> Result<()> {
+fn run_container_tunnel(
+    host: &str,
+    container: &str,
+    host_port: u32,
+    remote_port: u32,
+) -> Result<()> {
     let output = Command::new("ssh")
         .arg(&host)
         .arg(format!("docker inspect -f '{{{{range .NetworkSettings.Networks}}}}{{{{println .IPAddress}}}}{{{{end}}}}' {container} | head -n1"))
@@ -508,8 +511,6 @@ fn run_container_tunnel(host: &str, container: &str) -> Result<()> {
 
     let output_chars = String::from_utf8_lossy(&output.stdout);
     let container_ip = output_chars.trim();
-    let remote_port = prompt_number("Choose a port on the container")?;
-    let host_port: u32 = prompt_number("What local port to use?")?;
 
     let status = Command::new("ssh")
         .arg(host)
@@ -620,12 +621,29 @@ fn find_semantic_works_root_folder() -> Result<PathBuf> {
     bail!("Could not find a semantic.works app in this or any parent directory");
 }
 
-fn print_application_command(remote_app: &RemoteApp, application_command: ApplicationCommand) {
-    println!("Next time you can run the following command directly:");
-    println!(
-        "rpio apps {} --host {} --app-name {}",
-        application_command, remote_app.host, remote_app.app_name
-    );
+fn print_application_command(remote_app: &RemoteApp, application_command: &ApplicationCommand) {
+    if let ApplicationCommand::Tunnel {
+        container_name,
+        host_port,
+        remote_port,
+    } = application_command
+    {
+        // println!(
+        //     "rpio apps --host {} --app-name {} {} --container-name {} --host-port {} --remote-port {}",
+        //     remote_app.host,
+        //     remote_app.app_name,
+        //     application_command,
+        //     container_name,
+        //     host_port,
+        //     remote_port
+        // );
+    } else {
+        println!("Next time you can run the following command directly:");
+        println!(
+            "rpio apps --host {} --app-name {} {}",
+            remote_app.host, remote_app.app_name, application_command
+        );
+    }
 }
 
 fn main() -> Result<()> {
@@ -663,17 +681,39 @@ fn main() -> Result<()> {
                 };
 
             if let Some(remote_app) = selected_remote_app {
-                let command = if let Some(app_command) = app_command {
+                let command = if let Some(app_command) = &app_command {
                     app_command
                 } else {
-                    choose_application_command()?
+                    &choose_application_command()?
                 };
                 match command {
-                    ApplicationCommand::Tunnel => {
-                        let containers: Vec<String> = remote_app.fetch_containers()?;
-                        let result = run_fzf(&containers)?;
-                        if let Some(container) = result {
-                            run_container_tunnel(&remote_app.host, &container)?;
+                    ApplicationCommand::Tunnel {
+                        container_name,
+                        host_port,
+                        remote_port,
+                    } => {
+                        let container = if container_name.is_some() {
+                            container_name.to_owned()
+                        } else {
+                            let containers: Vec<String> = remote_app.fetch_containers()?;
+                            run_fzf(&containers)?
+                        };
+                        if let Some(container) = container {
+                            let remote_port = match remote_port {
+                                Some(port) => port.to_owned(),
+                                None => prompt_number("Choose a port on the container")?,
+                            };
+                            let host_port = match host_port {
+                                Some(port) => port.to_owned(),
+                                None => prompt_number("What local port to use?")?,
+                            };
+
+                            run_container_tunnel(
+                                &remote_app.host,
+                                &container,
+                                host_port,
+                                remote_port,
+                            )?;
                         }
                     }
                     ApplicationCommand::SshSession => {
@@ -707,7 +747,7 @@ fn main() -> Result<()> {
                 }
 
                 if host.is_none() || app_name.is_none() || app_command.is_none() {
-                    print_application_command(&remote_app, command);
+                    print_application_command(&remote_app, &command);
                 }
             } else {
                 return Ok(());
