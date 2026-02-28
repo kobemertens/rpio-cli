@@ -1,13 +1,22 @@
+mod cli;
+mod gum_wrapper;
+mod remote_app;
+mod spinner;
+mod fzf;
+
+use crate::fzf::run_fzf;
+use crate::cli::{ApplicationCommandCli, Cli, CommandsCli, ConfigCommand};
+use crate::gum_wrapper::prompt_number;
+use crate::remote_app::RemoteApp;
+use crate::spinner::create_and_start_spinner;
 use ansi_term::Style;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use chrono::format;
+use clap::Parser;
 use directories::ProjectDirs;
-use indicatif::ProgressBar;
-use indicatif::ProgressFinish;
-use indicatif::ProgressStyle;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
@@ -17,55 +26,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
-use std::time::Duration;
 use strum::IntoEnumIterator;
-use strum_macros::{Display, EnumIter, EnumString};
+use strum_macros::Display;
 use tempfile::NamedTempFile;
-
-#[derive(Parser)]
-#[command(name = "rpm")]
-#[command(about = "RPM CLI tool", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: CommandsCli,
-}
-
-#[derive(Subcommand, Clone)]
-enum CommandsCli {
-    Apps {
-        #[arg(short, long)]
-        refresh: bool,
-        #[arg(long)]
-        dry_run: bool,
-        #[arg(long)]
-        host: Option<String>,
-        #[arg(long)]
-        app_name: Option<String>,
-        #[command(subcommand)]
-        app_command: Option<ApplicationCommandCli>,
-    },
-    Config {
-        #[command(subcommand)]
-        command: ConfigCommand,
-    },
-}
-
-#[derive(Debug, Clone, EnumIter, EnumString, Display, Subcommand)]
-#[strum(serialize_all = "kebab-case")]
-enum ApplicationCommandCli {
-    SshSession,
-    Tunnel {
-        #[arg(long)]
-        container_name: Option<String>,
-        #[arg(long)]
-        host_port: Option<u32>,
-        #[arg(long)]
-        remote_port: Option<u32>,
-    },
-    RetrieveBackup,
-    RetrieveFiles,
-    HostedUrl,
-}
 
 enum Commands {
     Apps {
@@ -145,7 +108,7 @@ impl ApplicationCommand {
                     container_name
                 } else {
                     let containers: Vec<String> = remote_app.fetch_containers()?;
-                    run_fzf(&containers)?.ok_or_else(|| anyhow!("Could not find a container"))?
+                    run_fzf(&containers, "Choose a container")?.ok_or_else(|| anyhow!("Could not find a container"))?
                 };
                 let remote_port = match remote_port {
                     Some(port) => port.to_owned(),
@@ -162,80 +125,6 @@ impl ApplicationCommand {
                 })
             }
         }
-    }
-}
-
-#[derive(Subcommand, Clone)]
-enum ConfigCommand {
-    Init,
-}
-
-#[derive(Clone)]
-pub struct RemoteApp {
-    host: String,
-    app_name: String,
-}
-
-impl RemoteApp {
-    fn new(host: String, app_name: String) -> Self {
-        RemoteApp { host, app_name }
-    }
-
-    fn fetch_containers(&self) -> Result<Vec<String>> {
-        let spinner = create_and_start_spinner(&format!(
-            "Fetching containers for host: {} and app: {}",
-            &self.host, &self.app_name
-        ));
-        let mut command = Command::new("ssh");
-        command.arg(&self.host).arg(format!(
-            "cd /data/{} && docker compose ps --format {{{{.Names}}}}",
-            &self.app_name
-        ));
-        println!("{:?}", command);
-
-        let output = command.output()?;
-
-        spinner.finish();
-
-        Ok(String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(|x| x.to_owned())
-            .collect())
-    }
-
-    fn retrieve_app_docker_config(&self) -> Result<String> {
-        let spinner =
-            create_and_start_spinner(&format!("Fetching docker config for {}", &self.app_name));
-        let output = Command::new("ssh")
-            .arg(&self.host)
-            .arg(format!(
-                "cd {} && docker compose config",
-                self.remote_directory()
-            ))
-            .output()?;
-
-        spinner.finish();
-
-        Ok(String::from_utf8(output.stdout)?)
-    }
-
-    fn remote_directory(&self) -> String {
-        format!("/data/{}", self.app_name)
-    }
-}
-
-impl FromStr for RemoteApp {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        let (app_name, host) = s
-            .split_once(':')
-            .ok_or_else(|| anyhow!("Invalid format '{}': expected 'host:app_name'", s))?;
-
-        Ok(RemoteApp {
-            host: host.to_string(),
-            app_name: app_name.to_string(),
-        })
     }
 }
 
@@ -314,7 +203,7 @@ pub fn prompt_remote_app(config: &Config) -> anyhow::Result<Option<RemoteApp>> {
         return Ok(None);
     }
 
-    if let Some(selected) = run_fzf(&lines)? {
+    if let Some(selected) = run_fzf(&lines, "")? {
         return Ok(parse_selection(&selected));
     }
 
@@ -342,35 +231,6 @@ fn choose_application_command() -> Result<ApplicationCommandCli> {
     let selection = String::from_utf8(output.stdout)?.trim().to_owned();
 
     Ok(selection.parse()?)
-}
-
-fn run_fzf(lines: &[String]) -> anyhow::Result<Option<String>> {
-    let mut child = Command::new("fzf")
-        .args(["--ansi", "--prompt=Select application > "])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-
-    {
-        let stdin = child.stdin.as_mut().unwrap();
-        for line in lines {
-            writeln!(stdin, "{line}")?;
-        }
-    }
-
-    let output = child.wait_with_output()?;
-
-    if output.status.success() {
-        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        if selected.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(selected))
-        }
-    } else {
-        Ok(None)
-    }
 }
 
 fn load_or_fetch_servers_cache(ignore_hosts: &Vec<String>) -> anyhow::Result<ServersCache> {
@@ -415,19 +275,6 @@ pub fn load_config() -> Config {
     } else {
         Config::default()
     }
-}
-
-fn create_and_start_spinner(message: &str) -> ProgressBar {
-    let style = ProgressStyle::with_template("{spinner} {msg}")
-        .unwrap()
-        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]);
-
-    let bar = ProgressBar::new_spinner()
-        .with_style(style)
-        .with_message(message.to_owned())
-        .with_finish(ProgressFinish::WithMessage("✔ Done".into()));
-    bar.enable_steady_tick(Duration::from_millis(100));
-    bar
 }
 
 pub fn fetch_servers_cache(ignore_hosts: &Vec<String>) -> anyhow::Result<ServersCache> {
@@ -570,25 +417,6 @@ fn read_ssh_hosts() -> anyhow::Result<Vec<String>> {
         .collect();
 
     Ok(hosts)
-}
-
-fn prompt_number(prompt: &str) -> Result<u32> {
-    let output = Command::new("gum")
-        .arg("input")
-        .arg("--placeholder")
-        .arg("Enter a number...")
-        .arg("--header")
-        .arg(&prompt)
-        .stderr(Stdio::inherit())
-        .output()?;
-
-    if !output.status.success() {
-        bail!("gum was cancelled");
-    }
-
-    let input_str = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-
-    Ok(input_str.parse::<u32>()?)
 }
 
 fn run_container_tunnel(
