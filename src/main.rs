@@ -14,7 +14,6 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use chrono::Utc;
-use chrono::format;
 use clap::Parser;
 use directories::ProjectDirs;
 use regex::Regex;
@@ -185,7 +184,7 @@ pub fn servers_list(ignore_hosts: Vec<String>) -> anyhow::Result<()> {
     let lines = build_fzf_lines(&cache);
 
     if lines.is_empty() {
-        println!("No folders found");
+        println!("No remote applications found");
         return Ok(());
     }
 
