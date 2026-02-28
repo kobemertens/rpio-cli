@@ -3,7 +3,7 @@ use strum_macros::{Display, EnumIter, EnumString};
 
 #[derive(Parser)]
 #[command(name = "rpm")]
-#[command(about = "RPM CLI tool", long_about = None)]
+#[command(about = "Redpencil CLI tool", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: CommandsCli,

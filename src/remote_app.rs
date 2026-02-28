@@ -25,7 +25,6 @@ impl RemoteApp {
             "cd /data/{} && docker compose ps --format {{{{.Names}}}}",
             &self.app_name
         ));
-        println!("{:?}", command);
 
         let output = command.output()?;
 

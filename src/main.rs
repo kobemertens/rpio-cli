@@ -1,11 +1,11 @@
 mod cli;
+mod fzf;
 mod gum_wrapper;
 mod remote_app;
 mod spinner;
-mod fzf;
 
-use crate::fzf::run_fzf;
 use crate::cli::{ApplicationCommandCli, Cli, CommandsCli, ConfigCommand};
+use crate::fzf::run_fzf;
 use crate::gum_wrapper::prompt_number;
 use crate::remote_app::RemoteApp;
 use crate::spinner::create_and_start_spinner;
@@ -45,6 +45,7 @@ enum Commands {
 #[derive(Display)]
 #[strum(serialize_all = "kebab-case")]
 enum ApplicationCommand {
+    // TODO: store ApplicationCommandCli's here?
     SshSession,
     Tunnel {
         container_name: String,
@@ -108,7 +109,8 @@ impl ApplicationCommand {
                     container_name
                 } else {
                     let containers: Vec<String> = remote_app.fetch_containers()?;
-                    run_fzf(&containers, "Choose a container")?.ok_or_else(|| anyhow!("Could not find a container"))?
+                    run_fzf(&containers, "Choose a container")?
+                        .ok_or_else(|| anyhow!("Could not find a container"))?
                 };
                 let remote_port = match remote_port {
                     Some(port) => port.to_owned(),
@@ -312,7 +314,7 @@ pub fn write_default_config() -> anyhow::Result<()> {
     let path = config_dir().join("config.toml");
     let cfg = Config::default();
     let contents = toml::to_string_pretty(&cfg)?;
-    println!("Written config to {:?}", path.display());
+    println!("Written config to {}", path.display());
     std::fs::write(path, contents)?;
     Ok(())
 }
@@ -485,7 +487,6 @@ fn restore_backup_or_files(
         .arg("ssh")
         .arg(format!("{host}:{hostpath}"))
         .arg(localpath);
-    println!("{:?}", command);
     let output = command.output()?;
     spinner.finish();
     if !output.status.success() {
@@ -507,7 +508,6 @@ fn attach_ssh_session(remote_app: &RemoteApp) -> Result<()> {
         .arg("-t")
         .arg(&remote_app.host)
         .arg(format!("cd {app_dir} ; bash --login"));
-    println!("Running command {:?}", command);
     command.status()?;
 
     Ok(())
@@ -547,6 +547,7 @@ fn find_semantic_works_root_folder() -> Result<PathBuf> {
 }
 
 fn print_application_command(remote_app: &RemoteApp, application_command: &ApplicationCommand) {
+    println!("Next time you can run the following command directly:");
     if let ApplicationCommand::Tunnel {
         container_name,
         host_port,
@@ -558,7 +559,6 @@ fn print_application_command(remote_app: &RemoteApp, application_command: &Appli
             remote_app.host, remote_app.app_name, container_name, host_port, remote_port
         );
     } else {
-        println!("Next time you can run the following command directly:");
         println!(
             "rpio apps --host {} --app-name {} {}",
             remote_app.host, remote_app.app_name, application_command
@@ -594,12 +594,50 @@ fn main() -> Result<()> {
                     container_name,
                     host_port,
                     remote_port,
-                } => run_container_tunnel(
-                    &remote_app.host,
-                    &container_name,
-                    *host_port,
-                    *remote_port,
-                )?,
+                } => {
+                    // This is sadly needed because the tunnel command needs Ctrl+C to quit
+                    // Which terminates the program and does not allow us to print to "next time use ..."
+                    // message. Ideally we want to capture Ctrl+C and print the message before exiting
+                    if let CommandsCli::Apps {
+                        refresh: _,
+                        dry_run: _,
+                        host,
+                        app_name,
+                        app_command: app_command_cli,
+                    } = &cli.command
+                    {
+                        if host.is_none() || app_name.is_none() {
+                            print_application_command(&remote_app, &app_command);
+                        } else {
+                            match app_command_cli {
+                                None => print_application_command(&remote_app, &app_command),
+                                Some(app_command_cli) => {
+                                    if let ApplicationCommandCli::Tunnel {
+                                        container_name,
+                                        host_port,
+                                        remote_port,
+                                    } = app_command_cli
+                                    {
+                                        if container_name.is_none()
+                                            || host_port.is_none()
+                                            || remote_port.is_none()
+                                        {
+                                            print_application_command(&remote_app, &app_command);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        bail!("Should never happen");
+                    }
+                    run_container_tunnel(
+                        &remote_app.host,
+                        &container_name,
+                        *host_port,
+                        *remote_port,
+                    )?
+                }
                 ApplicationCommand::SshSession => attach_ssh_session(&remote_app)?,
                 ApplicationCommand::RetrieveBackup => {
                     let root_folder = find_semantic_works_root_folder()?;
