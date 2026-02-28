@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use std::str::FromStr;
 use std::time::Duration;
 use strum::IntoEnumIterator;
-use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
+use strum_macros::{Display, EnumIter, EnumString};
 use tempfile::NamedTempFile;
 
 #[derive(Parser)]
@@ -27,14 +27,14 @@ use tempfile::NamedTempFile;
 #[command(about = "RPM CLI tool", long_about = None)]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: CommandsCli,
 }
 
-#[derive(Subcommand)]
-enum Commands {
+#[derive(Subcommand, Clone)]
+enum CommandsCli {
     Apps {
-        #[arg(short, long, num_args = 0..)]
-        refresh: Option<Vec<String>>,
+        #[arg(short, long)]
+        refresh: bool,
         #[arg(long)]
         dry_run: bool,
         #[arg(long)]
@@ -42,7 +42,7 @@ enum Commands {
         #[arg(long)]
         app_name: Option<String>,
         #[command(subcommand)]
-        app_command: Option<ApplicationCommand>,
+        app_command: Option<ApplicationCommandCli>,
     },
     Config {
         #[command(subcommand)]
@@ -50,9 +50,9 @@ enum Commands {
     },
 }
 
-#[derive(Debug, Clone, EnumIter, EnumString, Display, AsRefStr, Subcommand)]
+#[derive(Debug, Clone, EnumIter, EnumString, Display, Subcommand)]
 #[strum(serialize_all = "kebab-case")]
-enum ApplicationCommand {
+enum ApplicationCommandCli {
     SshSession,
     Tunnel {
         #[arg(long)]
@@ -67,12 +67,105 @@ enum ApplicationCommand {
     HostedUrl,
 }
 
-#[derive(Subcommand)]
-enum BackupsCommand {
-    Restore,
+enum Commands {
+    Apps {
+        refresh: bool,
+        dry_run: bool,
+        remote_app: RemoteApp,
+        app_command: ApplicationCommand,
+    },
+    Config {
+        command: ConfigCommand,
+    },
 }
 
-#[derive(Subcommand)]
+#[derive(Display)]
+#[strum(serialize_all = "kebab-case")]
+enum ApplicationCommand {
+    SshSession,
+    Tunnel {
+        container_name: String,
+        host_port: u32,
+        remote_port: u32,
+    },
+    RetrieveBackup,
+    RetrieveFiles,
+    HostedUrl,
+}
+
+impl Commands {
+    fn build(commands_cli: &CommandsCli, config: &Config) -> Result<Self> {
+        match commands_cli {
+            CommandsCli::Config { command } => Ok(Commands::Config {
+                command: command.to_owned(),
+            }),
+            CommandsCli::Apps {
+                refresh,
+                dry_run,
+                host,
+                app_name,
+                app_command,
+            } => {
+                let remote_app: RemoteApp = if let (Some(host), Some(app_name)) = (&host, &app_name)
+                {
+                    RemoteApp::new(host.to_owned(), app_name.to_owned())
+                } else {
+                    prompt_remote_app(&config)?.ok_or_else(|| anyhow!("Could not find any apps"))?
+                };
+
+                let app_command = match app_command {
+                    Some(app_command) => app_command.to_owned(),
+                    None => choose_application_command()?,
+                };
+
+                Ok(Commands::Apps {
+                    refresh: *refresh,
+                    dry_run: *dry_run,
+                    remote_app: remote_app.to_owned(),
+                    app_command: ApplicationCommand::build(app_command, &remote_app)?,
+                })
+            }
+        }
+    }
+}
+
+impl ApplicationCommand {
+    fn build(value: ApplicationCommandCli, remote_app: &RemoteApp) -> Result<Self> {
+        match value {
+            ApplicationCommandCli::HostedUrl => Ok(ApplicationCommand::HostedUrl),
+            ApplicationCommandCli::RetrieveBackup => Ok(ApplicationCommand::RetrieveBackup),
+            ApplicationCommandCli::RetrieveFiles => Ok(ApplicationCommand::RetrieveFiles),
+            ApplicationCommandCli::SshSession => Ok(ApplicationCommand::SshSession),
+            ApplicationCommandCli::Tunnel {
+                container_name,
+                host_port,
+                remote_port,
+            } => {
+                let container: String = if let Some(container_name) = container_name {
+                    container_name
+                } else {
+                    let containers: Vec<String> = remote_app.fetch_containers()?;
+                    run_fzf(&containers)?.ok_or_else(|| anyhow!("Could not find a container"))?
+                };
+                let remote_port = match remote_port {
+                    Some(port) => port.to_owned(),
+                    None => prompt_number("Choose a port on the container")?,
+                };
+                let host_port = match host_port {
+                    Some(port) => port.to_owned(),
+                    None => prompt_number("What local port to use?")?,
+                };
+                Ok(ApplicationCommand::Tunnel {
+                    container_name: container,
+                    remote_port,
+                    host_port,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Subcommand, Clone)]
 enum ConfigCommand {
     Init,
 }
@@ -210,7 +303,7 @@ pub fn servers_list(ignore_hosts: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn servers_search(config: &Config) -> anyhow::Result<Option<RemoteApp>> {
+pub fn prompt_remote_app(config: &Config) -> anyhow::Result<Option<RemoteApp>> {
     let ignore_hosts = &config.ignore_hosts;
     let cache = load_or_fetch_servers_cache(&ignore_hosts)?;
 
@@ -228,8 +321,8 @@ pub fn servers_search(config: &Config) -> anyhow::Result<Option<RemoteApp>> {
     Ok(None)
 }
 
-fn choose_application_command() -> Result<ApplicationCommand> {
-    let options: Vec<String> = ApplicationCommand::iter()
+fn choose_application_command() -> Result<ApplicationCommandCli> {
+    let options: Vec<String> = ApplicationCommandCli::iter()
         .map(|c| format!("{}", c))
         .collect();
 
@@ -504,12 +597,16 @@ fn run_container_tunnel(
     host_port: u32,
     remote_port: u32,
 ) -> Result<()> {
+    let spinner = create_and_start_spinner("Retrieving container IP");
     let output = Command::new("ssh")
         .arg(&host)
         .arg(format!("docker inspect -f '{{{{range .NetworkSettings.Networks}}}}{{{{println .IPAddress}}}}{{{{end}}}}' {container} | head -n1"))
         .output()?;
 
+    spinner.finish();
+
     let output_chars = String::from_utf8_lossy(&output.stdout);
+
     let container_ip = output_chars.trim();
 
     let status = Command::new("ssh")
@@ -628,15 +725,10 @@ fn print_application_command(remote_app: &RemoteApp, application_command: &Appli
         remote_port,
     } = application_command
     {
-        // println!(
-        //     "rpio apps --host {} --app-name {} {} --container-name {} --host-port {} --remote-port {}",
-        //     remote_app.host,
-        //     remote_app.app_name,
-        //     application_command,
-        //     container_name,
-        //     host_port,
-        //     remote_port
-        // );
+        println!(
+            "rpio apps --host {} --app-name {} tunnel --container-name {} --host-port {} --remote-port {}",
+            remote_app.host, remote_app.app_name, container_name, host_port, remote_port
+        );
     } else {
         println!("Next time you can run the following command directly:");
         println!(
@@ -651,106 +743,95 @@ fn main() -> Result<()> {
     let config = load_config();
     init_runtime_dirs(&config)?;
 
-    match cli.command {
+    let command = Commands::build(&cli.command, &config)?;
+
+    match command {
         Commands::Apps {
             dry_run,
             refresh,
-            host,
-            app_name,
+            remote_app,
             app_command,
         } => {
             if dry_run {
                 bail!("Not implemented yet");
             }
-            match refresh {
-                None => {}
-                Some(servers) if servers.is_empty() => {
-                    let cache = fetch_servers_cache(&config.ignore_hosts)?;
-                    write_servers_cache(&cache)?;
+
+            if refresh {
+                let cache = fetch_servers_cache(&config.ignore_hosts)?;
+                write_servers_cache(&cache)?;
+            }
+
+            match &app_command {
+                ApplicationCommand::Tunnel {
+                    container_name,
+                    host_port,
+                    remote_port,
+                } => run_container_tunnel(
+                    &remote_app.host,
+                    &container_name,
+                    *host_port,
+                    *remote_port,
+                )?,
+                ApplicationCommand::SshSession => attach_ssh_session(&remote_app)?,
+                ApplicationCommand::RetrieveBackup => {
+                    let root_folder = find_semantic_works_root_folder()?;
+                    restore_backup_or_files(
+                        &remote_app.host,
+                        &remote_app.app_name,
+                        &root_folder,
+                        true,
+                    )?;
                 }
-                Some(servers) => {
-                    bail!("Partial refresh not implemented yet!");
+                ApplicationCommand::RetrieveFiles => {
+                    let root_folder = find_semantic_works_root_folder()?;
+                    restore_backup_or_files(
+                        &remote_app.host,
+                        &remote_app.app_name,
+                        &root_folder,
+                        false,
+                    )?;
+                }
+                ApplicationCommand::HostedUrl => {
+                    let yaml = remote_app.retrieve_app_docker_config()?;
+                    let doc: Value = serde_yaml::from_str(&yaml)?;
+                    if let Some(url) = get_env(&doc, "identifier", "LETSENCRYPT_HOST") {
+                        println!("https://{url}");
+                    }
                 }
             }
 
-            let selected_remote_app: Option<RemoteApp> =
-                if let (Some(host), Some(app_name)) = (&host, &app_name) {
-                    Some(RemoteApp::new(host.to_owned(), app_name.to_owned()))
+            if let CommandsCli::Apps {
+                refresh: _,
+                dry_run: _,
+                host,
+                app_name,
+                app_command: app_command_cli,
+            } = &cli.command
+            {
+                if host.is_none() || app_name.is_none() {
+                    print_application_command(&remote_app, &app_command);
                 } else {
-                    servers_search(&config)?
-                };
-
-            if let Some(remote_app) = selected_remote_app {
-                let command = if let Some(app_command) = &app_command {
-                    app_command
-                } else {
-                    &choose_application_command()?
-                };
-                match command {
-                    ApplicationCommand::Tunnel {
-                        container_name,
-                        host_port,
-                        remote_port,
-                    } => {
-                        let container = if container_name.is_some() {
-                            container_name.to_owned()
-                        } else {
-                            let containers: Vec<String> = remote_app.fetch_containers()?;
-                            run_fzf(&containers)?
-                        };
-                        if let Some(container) = container {
-                            let remote_port = match remote_port {
-                                Some(port) => port.to_owned(),
-                                None => prompt_number("Choose a port on the container")?,
-                            };
-                            let host_port = match host_port {
-                                Some(port) => port.to_owned(),
-                                None => prompt_number("What local port to use?")?,
-                            };
-
-                            run_container_tunnel(
-                                &remote_app.host,
-                                &container,
+                    match app_command_cli {
+                        None => print_application_command(&remote_app, &app_command),
+                        Some(app_command_cli) => {
+                            if let ApplicationCommandCli::Tunnel {
+                                container_name,
                                 host_port,
                                 remote_port,
-                            )?;
+                            } = app_command_cli
+                            {
+                                if container_name.is_none()
+                                    || host_port.is_none()
+                                    || remote_port.is_none()
+                                {
+                                    print_application_command(&remote_app, &app_command);
+                                }
+                            }
                         }
                     }
-                    ApplicationCommand::SshSession => {
-                        attach_ssh_session(&remote_app)?;
-                    }
-                    ApplicationCommand::RetrieveBackup => {
-                        let root_folder = find_semantic_works_root_folder()?;
-                        restore_backup_or_files(
-                            &remote_app.host,
-                            &remote_app.app_name,
-                            &root_folder,
-                            true,
-                        )?;
-                    }
-                    ApplicationCommand::RetrieveFiles => {
-                        let root_folder = find_semantic_works_root_folder()?;
-                        restore_backup_or_files(
-                            &remote_app.host,
-                            &remote_app.app_name,
-                            &root_folder,
-                            false,
-                        )?;
-                    }
-                    ApplicationCommand::HostedUrl => {
-                        let yaml = remote_app.retrieve_app_docker_config()?;
-                        let doc: Value = serde_yaml::from_str(&yaml)?;
-                        if let Some(url) = get_env(&doc, "identifier", "LETSENCRYPT_HOST") {
-                            println!("https://{url}");
-                        }
-                    }
-                }
-
-                if host.is_none() || app_name.is_none() || app_command.is_none() {
-                    print_application_command(&remote_app, &command);
                 }
             } else {
-                return Ok(());
+                bail!("Should never happen");
             }
         }
         Commands::Config { command } => match command {
@@ -759,5 +840,6 @@ fn main() -> Result<()> {
             }
         },
     }
+
     Ok(())
 }
