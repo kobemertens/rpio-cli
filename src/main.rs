@@ -1,5 +1,6 @@
 use ansi_term::Style;
 use anyhow::Result;
+use anyhow::anyhow;
 use anyhow::bail;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
@@ -15,6 +16,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::str::FromStr;
 use std::time::Duration;
 use strum::IntoEnumIterator;
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
@@ -31,10 +33,16 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Apps {
-        #[arg(long)]
-        dry_run: bool,
         #[arg(short, long, num_args = 0..)]
         refresh: Option<Vec<String>>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        app_name: Option<String>,
+        #[arg()]
+        app_command: Option<ApplicationCommand>,
     },
     Config {
         #[command(subcommand)]
@@ -42,7 +50,7 @@ enum Commands {
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum AppsCommand {
     List,
     Refresh,
@@ -71,6 +79,7 @@ enum ConfigCommand {
     Init,
 }
 
+#[derive(Clone)]
 pub struct RemoteApp {
     host: String,
     app_name: String,
@@ -124,6 +133,21 @@ impl RemoteApp {
     }
 }
 
+impl FromStr for RemoteApp {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let (app_name, host) = s
+            .split_once(':')
+            .ok_or_else(|| anyhow!("Invalid format '{}': expected 'host:app_name'", s))?;
+
+        Ok(RemoteApp {
+            host: host.to_string(),
+            app_name: app_name.to_string(),
+        })
+    }
+}
+
 fn project_dirs() -> ProjectDirs {
     ProjectDirs::from("com", "redpencil", "rpio-cli").expect("Could not determine config directory")
 }
@@ -167,12 +191,10 @@ fn build_fzf_lines(cache: &ServersCache) -> Vec<String> {
     lines
 }
 
-fn parse_selection(selected: &str) -> Option<(String, String)> {
+fn parse_selection(selected: &str) -> Option<RemoteApp> {
     let clean = strip_ansi(selected);
 
-    let (folder, host) = clean.split_once(':')?;
-
-    Some((host.to_string(), folder.to_string()))
+    RemoteApp::from_str(&clean).ok()
 }
 
 pub fn servers_list(ignore_hosts: Vec<String>) -> anyhow::Result<()> {
@@ -202,9 +224,7 @@ pub fn servers_search(config: &Config) -> anyhow::Result<Option<RemoteApp>> {
     }
 
     if let Some(selected) = run_fzf(&lines)? {
-        if let Some((host, app_name)) = parse_selection(&selected) {
-            return Ok(Some(RemoteApp::new(host, app_name)));
-        }
+        return Ok(parse_selection(&selected));
     }
 
     Ok(None)
@@ -600,13 +620,27 @@ fn find_semantic_works_root_folder() -> Result<PathBuf> {
     bail!("Could not find a semantic.works app in this or any parent directory");
 }
 
+fn print_application_command(remote_app: &RemoteApp, application_command: ApplicationCommand) {
+    println!("Next time you can run the following command directly:");
+    println!(
+        "rpio apps {} --host {} --app-name {}",
+        application_command, remote_app.host, remote_app.app_name
+    );
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = load_config();
     init_runtime_dirs(&config)?;
 
     match cli.command {
-        Commands::Apps { dry_run, refresh } => {
+        Commands::Apps {
+            dry_run,
+            refresh,
+            host,
+            app_name,
+            app_command,
+        } => {
             if dry_run {
                 bail!("Not implemented yet");
             }
@@ -620,19 +654,26 @@ fn main() -> Result<()> {
                     bail!("Partial refresh not implemented yet!");
                 }
             }
-            let selected_server = servers_search(&config)?;
 
-            if let Some(remote_app) = selected_server {
-                let command = choose_application_command()?;
+            let selected_remote_app: Option<RemoteApp> =
+                if let (Some(host), Some(app_name)) = (&host, &app_name) {
+                    Some(RemoteApp::new(host.to_owned(), app_name.to_owned()))
+                } else {
+                    servers_search(&config)?
+                };
+
+            if let Some(remote_app) = selected_remote_app {
+                let command = if let Some(app_command) = app_command {
+                    app_command
+                } else {
+                    choose_application_command()?
+                };
                 match command {
                     ApplicationCommand::Tunnel => {
                         let containers: Vec<String> = remote_app.fetch_containers()?;
                         let result = run_fzf(&containers)?;
                         if let Some(container) = result {
-                            run_container_tunnel(
-                                &remote_app.host,
-                                &container,
-                            )?;
+                            run_container_tunnel(&remote_app.host, &container)?;
                         }
                     }
                     ApplicationCommand::SshSession => {
@@ -663,6 +704,10 @@ fn main() -> Result<()> {
                             println!("https://{url}");
                         }
                     }
+                }
+
+                if host.is_none() || app_name.is_none() || app_command.is_none() {
+                    print_application_command(&remote_app, command);
                 }
             } else {
                 return Ok(());
