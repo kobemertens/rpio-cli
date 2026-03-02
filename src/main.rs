@@ -416,7 +416,7 @@ pub fn write_servers_cache(cache: &ServersCache) -> anyhow::Result<()> {
 fn read_ssh_hosts() -> anyhow::Result<Vec<String>> {
     let path = dirs::home_dir().expect("home dir").join(".ssh/config");
 
-    let contents = fs::read_to_string(path)?;
+    let contents: String = fs::read_to_string(path).map_err(|_| anyhow!("Could not open .ssh/config file to read hosts"))?;
 
     let hosts = contents
         .lines()

@@ -20,10 +20,11 @@ Options:
 ```
 
 ```sh
-# List all remote semantic works apps that are running on the hosts configured in your SSH config.
-# Uses a wizard style workflow to ask for the information it needs
 $ rpio apps
+```
+List all remote semantic works apps that are running on the hosts configured in your SSH config. Uses a wizard style workflow to ask for the information it needs
 
+```sh
 # Specify command arguments, any missing required arguments will be prompted.
 $ rpio apps --host foo --app-name app-bar-qa tunnel --container-name app-bar-qa-triplestore-1 --host-port 8890 --remote-port 8890
 ```
