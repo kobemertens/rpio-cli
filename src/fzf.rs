@@ -1,9 +1,14 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-pub fn run_fzf(lines: &[String], prompt: &str) -> anyhow::Result<Option<String>> {
+pub fn run_fzf(lines: &[String], prompt: &str, query: &str) -> anyhow::Result<Option<String>> {
     let mut child = Command::new("fzf")
-        .args(["--ansi", &format!("--prompt={prompt} > ")])
+        .args([
+            "--query",
+            &format!("{query} "),
+            "--ansi",
+            &format!("--prompt={prompt} > "),
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;

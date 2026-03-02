@@ -69,12 +69,16 @@ impl Commands {
                 app_name,
                 app_command,
             } => {
-                let remote_app: RemoteApp = if let (Some(host), Some(app_name)) = (&host, &app_name)
-                {
-                    RemoteApp::new(host.to_owned(), app_name.to_owned())
-                } else {
-                    prompt_remote_app(&config)?.ok_or_else(|| anyhow!("Could not find any apps"))?
+                let remote_app = match (&host, &app_name) {
+                    (Some(host), Some(app_name)) => {
+                        Ok(Some(RemoteApp::new(host.to_string(), app_name.to_string())))
+                    }
+                    (Some(host), None) => prompt_remote_app(&config, host),
+                    (None, Some(app_name)) => prompt_remote_app(&config, app_name),
+                    (None, None) => prompt_remote_app(&config, ""),
                 };
+
+                let remote_app = remote_app?.ok_or_else(|| anyhow!("Could not find any apps"))?;
 
                 let app_command = match app_command {
                     Some(app_command) => app_command.to_owned(),
@@ -108,7 +112,7 @@ impl ApplicationCommand {
                     container_name
                 } else {
                     let containers: Vec<String> = remote_app.fetch_containers()?;
-                    run_fzf(&containers, "Choose a container")?
+                    run_fzf(&containers, "Choose a container", "")?
                         .ok_or_else(|| anyhow!("Could not find a container"))?
                 };
                 let remote_port = match remote_port {
@@ -193,7 +197,10 @@ pub fn servers_list(ignore_hosts: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn prompt_remote_app(config: &Config) -> anyhow::Result<Option<RemoteApp>> {
+pub fn prompt_remote_app(
+    config: &Config,
+    fzf_search_query: &str,
+) -> anyhow::Result<Option<RemoteApp>> {
     let ignore_hosts = &config.ignore_hosts;
     let cache = load_or_fetch_servers_cache(&ignore_hosts)?;
 
@@ -204,7 +211,7 @@ pub fn prompt_remote_app(config: &Config) -> anyhow::Result<Option<RemoteApp>> {
         return Ok(None);
     }
 
-    if let Some(selected) = run_fzf(&lines, "")? {
+    if let Some(selected) = run_fzf(&lines, "Choose an application", fzf_search_query)? {
         return Ok(parse_selection(&selected));
     }
 
