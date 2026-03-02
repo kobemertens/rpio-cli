@@ -31,7 +31,6 @@ use tempfile::NamedTempFile;
 
 enum Commands {
     Apps {
-        refresh: bool,
         dry_run: bool,
         remote_app: RemoteApp,
         app_command: ApplicationCommand,
@@ -90,7 +89,6 @@ impl Commands {
                 };
 
                 Ok(Commands::Apps {
-                    refresh: *refresh,
                     dry_run: *dry_run,
                     remote_app: remote_app.to_owned(),
                     app_command: ApplicationCommand::build(app_command, &remote_app)?,
@@ -588,7 +586,6 @@ fn main() -> Result<()> {
     match command {
         Commands::Apps {
             dry_run,
-            refresh: _,
             remote_app,
             app_command,
         } => {
