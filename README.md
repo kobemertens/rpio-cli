@@ -28,6 +28,15 @@ or specify command arguments directly, any missing required arguments will be pr
 $ rpio apps --host foo --app-name app-bar-qa tunnel --container-name app-bar-qa-triplestore-1 --host-port 8890 --remote-port 8890
 ```
 
+## Config
+To create an initial config file, run `rpio config init`. This will create a `$HOME/.config/rpio-cli/config.toml` file with the following contents:
+```toml
+cache_dir = "/home/<USERNAME>/.cache/rpio-cli"
+ignore_hosts = []
+```
+- `cache_dir`: Folder where any cache storage will be placed.
+- `ignore_hosts`: Hosts configured in `.ssh/config` that should not be scanned for semantic.works applications
+
 ## Installation
 
 ### Prerequisites
