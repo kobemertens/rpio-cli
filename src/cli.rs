@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use strum_macros::{Display, EnumIter, EnumString};
 
 #[derive(Parser)]
-#[command(name = "rpm")]
+#[command(name = "rpio")]
 #[command(about = "Redpencil CLI tool", long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
