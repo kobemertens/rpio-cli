@@ -43,7 +43,7 @@ Install Rust and cargo using your preferred method (or have a look [here](https:
 git clone git@github.com:kobemertens/rpio-cli.git
 cd rpio-cli
 cargo build --release
-````
+```
 
 This will create a executable `target/release/rpio` that you can add to your `PATH`.
 
