@@ -11,6 +11,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Clone)]
 pub enum CommandsCli {
+    #[command(about = "Manage deployed applications")]
     Apps {
         #[arg(short, long)]
         refresh: bool,
@@ -23,6 +24,7 @@ pub enum CommandsCli {
         #[command(subcommand)]
         app_command: Option<ApplicationCommandCli>,
     },
+    #[command(about = "Manage configuration")]
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
@@ -48,5 +50,6 @@ pub enum ApplicationCommandCli {
 
 #[derive(Subcommand, Clone)]
 pub enum ConfigCommand {
+    #[command(about = "Create initial configuration file")]
     Init,
 }

@@ -69,6 +69,10 @@ impl Commands {
                 app_name,
                 app_command,
             } => {
+                if *refresh {
+                    let cache = fetch_servers_cache(&config.ignore_hosts)?;
+                    write_servers_cache(&cache)?;
+                }
                 let remote_app = match (&host, &app_name) {
                     (Some(host), Some(app_name)) => {
                         Ok(Some(RemoteApp::new(host.to_string(), app_name.to_string())))
@@ -349,6 +353,8 @@ pub struct DataFolder {
 
 fn fetch_data_folders(host: &str) -> Vec<DataFolder> {
     let output = Command::new("ssh")
+        .arg("-o")
+        .arg("ConnectTimeout=30")
         .arg(host)
         .arg("ls -1 /data 2>/dev/null")
         .output();
@@ -582,17 +588,12 @@ fn main() -> Result<()> {
     match command {
         Commands::Apps {
             dry_run,
-            refresh,
+            refresh: _,
             remote_app,
             app_command,
         } => {
             if dry_run {
                 bail!("Not implemented yet");
-            }
-
-            if refresh {
-                let cache = fetch_servers_cache(&config.ignore_hosts)?;
-                write_servers_cache(&cache)?;
             }
 
             match &app_command {
