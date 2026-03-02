@@ -68,6 +68,11 @@ impl Commands {
                 app_name,
                 app_command,
             } => {
+                let app_command = match app_command {
+                    Some(app_command) => app_command.to_owned(),
+                    None => choose_application_command()?,
+                };
+
                 if *refresh {
                     let cache = fetch_servers_cache(&config.ignore_hosts)?;
                     write_servers_cache(&cache)?;
@@ -82,11 +87,6 @@ impl Commands {
                 };
 
                 let remote_app = remote_app?.ok_or_else(|| anyhow!("Could not find any apps"))?;
-
-                let app_command = match app_command {
-                    Some(app_command) => app_command.to_owned(),
-                    None => choose_application_command()?,
-                };
 
                 Ok(Commands::Apps {
                     dry_run: *dry_run,
