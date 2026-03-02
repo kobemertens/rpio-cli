@@ -664,8 +664,9 @@ fn main() -> Result<()> {
                 ApplicationCommand::HostedUrl => {
                     let yaml = remote_app.retrieve_app_docker_config()?;
                     let doc: Value = serde_yaml::from_str(&yaml)?;
-                    if let Some(url) = get_env(&doc, "identifier", "LETSENCRYPT_HOST") {
-                        println!("https://{url}");
+                    match get_env(&doc, "identifier", "LETSENCRYPT_HOST") {
+                        Some(url) => println!("https://{url}"),
+                        None => bail!("No URL specified in the docker config")
                     }
                 }
             }
