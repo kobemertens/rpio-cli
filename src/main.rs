@@ -119,6 +119,7 @@ impl ApplicationCommand {
                 };
                 let remote_port = match remote_port {
                     Some(port) => port.to_owned(),
+                    // TODO make better message?
                     None => prompt_number("Choose a port on the container")?,
                 };
                 let host_port = match host_port {
@@ -161,6 +162,7 @@ fn get_env(doc: &Value, service: &str, key: &str) -> Option<String> {
 pub struct Config {
     pub cache_dir: PathBuf,
     pub ignore_hosts: Vec<String>,
+    pub next_time_use_msg: bool,
 }
 
 fn build_fzf_lines(cache: &ServersCache) -> Vec<String> {
@@ -260,6 +262,7 @@ impl Default for Config {
         Self {
             cache_dir: default_cache_dir(),
             ignore_hosts: Vec::new(),
+            next_time_use_msg: true,
         }
     }
 }
@@ -414,7 +417,8 @@ pub fn write_servers_cache(cache: &ServersCache) -> anyhow::Result<()> {
 fn read_ssh_hosts() -> anyhow::Result<Vec<String>> {
     let path = dirs::home_dir().expect("home dir").join(".ssh/config");
 
-    let contents: String = fs::read_to_string(path).map_err(|_| anyhow!("Could not open .ssh/config file to read hosts"))?;
+    let contents: String = fs::read_to_string(path)
+        .map_err(|_| anyhow!("Could not open .ssh/config file to read hosts"))?;
 
     let hosts = contents
         .lines()
@@ -557,7 +561,7 @@ fn find_semantic_works_root_folder() -> Result<PathBuf> {
 }
 
 fn print_application_command(remote_app: &RemoteApp, application_command: &ApplicationCommand) {
-    println!("Next time you can run the following command directly:");
+    println!("💡 Next time you can run the following command directly:");
     if let ApplicationCommand::Tunnel {
         container_name,
         host_port,
@@ -610,23 +614,29 @@ fn main() -> Result<()> {
                         app_command: app_command_cli,
                     } = &cli.command
                     {
-                        if host.is_none() || app_name.is_none() {
-                            print_application_command(&remote_app, &app_command);
-                        } else {
-                            match app_command_cli {
-                                None => print_application_command(&remote_app, &app_command),
-                                Some(app_command_cli) => {
-                                    if let ApplicationCommandCli::Tunnel {
-                                        container_name,
-                                        host_port,
-                                        remote_port,
-                                    } = app_command_cli
-                                    {
-                                        if container_name.is_none()
-                                            || host_port.is_none()
-                                            || remote_port.is_none()
+                        // TODO remove code duplication (same code is copied 70 lines donw)
+                        if config.next_time_use_msg {
+                            if host.is_none() || app_name.is_none() {
+                                print_application_command(&remote_app, &app_command);
+                            } else {
+                                match app_command_cli {
+                                    None => print_application_command(&remote_app, &app_command),
+                                    Some(app_command_cli) => {
+                                        if let ApplicationCommandCli::Tunnel {
+                                            container_name,
+                                            host_port,
+                                            remote_port,
+                                        } = app_command_cli
                                         {
-                                            print_application_command(&remote_app, &app_command);
+                                            if container_name.is_none()
+                                                || host_port.is_none()
+                                                || remote_port.is_none()
+                                            {
+                                                print_application_command(
+                                                    &remote_app,
+                                                    &app_command,
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -665,8 +675,13 @@ fn main() -> Result<()> {
                     let yaml = remote_app.retrieve_app_docker_config()?;
                     let doc: Value = serde_yaml::from_str(&yaml)?;
                     match get_env(&doc, "identifier", "LETSENCRYPT_HOST") {
-                        Some(url) => println!("https://{url}"),
-                        None => bail!("No URL specified in the docker config")
+                        Some(url) => {
+                            println!("");
+                            println!("");
+                            println!("The app is hosted at: https://{url}");
+                            println!("");
+                        }
+                        None => bail!("No URL specified in the docker config"),
                     }
                 }
             }
@@ -679,23 +694,26 @@ fn main() -> Result<()> {
                 app_command: app_command_cli,
             } = &cli.command
             {
-                if host.is_none() || app_name.is_none() {
-                    print_application_command(&remote_app, &app_command);
-                } else {
-                    match app_command_cli {
-                        None => print_application_command(&remote_app, &app_command),
-                        Some(app_command_cli) => {
-                            if let ApplicationCommandCli::Tunnel {
-                                container_name,
-                                host_port,
-                                remote_port,
-                            } = app_command_cli
-                            {
-                                if container_name.is_none()
-                                    || host_port.is_none()
-                                    || remote_port.is_none()
+                // TODO remove code duplication
+                if config.next_time_use_msg {
+                    if host.is_none() || app_name.is_none() {
+                        print_application_command(&remote_app, &app_command);
+                    } else {
+                        match app_command_cli {
+                            None => print_application_command(&remote_app, &app_command),
+                            Some(app_command_cli) => {
+                                if let ApplicationCommandCli::Tunnel {
+                                    container_name,
+                                    host_port,
+                                    remote_port,
+                                } = app_command_cli
                                 {
-                                    print_application_command(&remote_app, &app_command);
+                                    if container_name.is_none()
+                                        || host_port.is_none()
+                                        || remote_port.is_none()
+                                    {
+                                        print_application_command(&remote_app, &app_command);
+                                    }
                                 }
                             }
                         }

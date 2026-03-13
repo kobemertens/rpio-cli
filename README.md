@@ -33,9 +33,11 @@ To create an initial config file, run `rpio config init`. This will create a `$H
 ```toml
 cache_dir = "/home/<USERNAME>/.cache/rpio-cli"
 ignore_hosts = []
+next_time_use_msg = true
 ```
 - `cache_dir`: Folder where any cache storage will be placed.
 - `ignore_hosts`: Hosts configured in `.ssh/config` that should not be scanned for semantic.works applications
+- `next_time_use_msg`: If set to `true`, after following the "wizard-style" workflow, a command will be printed which sets the variable arguments directly using command line arguments. This allows to re-run the same command without going trough the wizard again.
 
 ## Installation
 
